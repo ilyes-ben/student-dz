@@ -11,6 +11,50 @@ if (!token) {
 
 const bot = new TelegramBot(token, { polling: true });
 
+const REQUIRED_CHANNEL = '@StudentDZ_Official';
+
+async function isSubscribed(userId) {
+  try {
+    const member = await bot.getChatMember(REQUIRED_CHANNEL, userId);
+
+    return (
+      member.status === 'creator' ||
+      member.status === 'administrator' ||
+      member.status === 'member' ||
+      (member.status === 'restricted' && member.is_member === true)
+    );
+  } catch (error) {
+    console.error('Subscription check error:', error.message);
+    return null;
+  }
+}
+
+async function sendSubscriptionPrompt(chatId) {
+  await bot.sendMessage(
+    chatId,
+    '🔒 لاستخدام Student DZ، يجب الاشتراك في قناتنا أولًا.',
+    {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            {
+              text: '📢 الاشتراك في القناة',
+              url: 'https://t.me/StudentDZ_Official'
+            }
+          ],
+          [
+            {
+              text: '✅ تحققت من الاشتراك',
+              callback_data: 'check_subscription'
+            }
+          ]
+        ]
+      }
+    }
+  );
+}
+
+
 const statsPath = path.join(__dirname, 'stats.json');
 
 function loadStats() {
@@ -454,18 +498,39 @@ function showSubjects(chatId, level, semester, page) {
 }
 
 
-bot.onText(/\/start/, (msg) => {
+
+bot.onText(/^\/start/, async (msg) => {
   recordUser(msg);
 
-  bot.sendMessage(
+  const subscription = await isSubscribed(msg.from.id);
+
+  if (subscription === null) {
+    await bot.sendMessage(
+      msg.chat.id,
+      'تعذّر التحقق من الاشتراك حاليًا. حاول مجددًا بعد قليل.'
+    );
+    return;
+  }
+
+  if (!subscription) {
+    await sendSubscriptionPrompt(msg.chat.id);
+    return;
+  }
+
+  await bot.sendMessage(
     msg.chat.id,
     'مرحبًا بك في Student DZ 🎓\n\n' +
       'مكتبة الامتحانات والفروض الجامعية\n' +
       'جامعة برج بوعريريج\n\n' +
       'اختر مستواك:',
-    { reply_markup: { inline_keyboard: levelsKeyboard() } }
+    {
+      reply_markup: {
+        inline_keyboard: levelsKeyboard()
+      }
+    }
   );
 });
+
 
 
 bot.onText(/^\/stats(@\w+)?$/, async (msg) => {
@@ -513,6 +578,52 @@ bot.on('callback_query', async (query) => {
 
     const chatId = query.message.chat.id;
     const choice = query.data;
+    
+    // زر إعادة التحقق من الاشتراك
+    if (choice === 'check_subscription') {
+      const subscription = await isSubscribed(query.from.id);
+
+      if (subscription === null) {
+        await bot.sendMessage(
+          chatId,
+          'تعذّر التحقق من الاشتراك. حاول مجددًا بعد قليل.'
+        );
+        return;
+      }
+
+      if (!subscription) {
+        await sendSubscriptionPrompt(chatId);
+        return;
+      }
+
+      await bot.sendMessage(
+        chatId,
+        '✅ تم التحقق من اشتراكك بنجاح!\n\nاختر مستواك:',
+        {
+          reply_markup: {
+            inline_keyboard: levelsKeyboard()
+          }
+        }
+      );
+      return;
+    }
+
+    // منع استخدام أزرار القوائم دون اشتراك
+    const subscription = await isSubscribed(query.from.id);
+
+    if (subscription === null) {
+      await bot.sendMessage(
+        chatId,
+        'تعذّر التحقق من الاشتراك حاليًا. حاول مجددًا بعد قليل.'
+      );
+      return;
+    }
+
+    if (!subscription) {
+      await sendSubscriptionPrompt(chatId);
+      return;
+    }
+
 
     // العودة إلى قائمة المستويات
     if (choice === 'back_levels') {
