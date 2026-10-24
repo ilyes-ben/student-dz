@@ -11,6 +11,49 @@ if (!token) {
 
 const bot = new TelegramBot(token, { polling: true });
 
+const statsPath = path.join(__dirname, 'stats.json');
+
+function loadStats() {
+  try {
+    if (fs.existsSync(statsPath)) {
+      const data = JSON.parse(fs.readFileSync(statsPath, 'utf8'));
+      if (!data.users || typeof data.users !== 'object') data.users = {};
+      return data;
+    }
+  } catch (error) {
+    console.error('Could not read stats:', error.message);
+  }
+
+  return { users: {} };
+}
+
+let stats = loadStats();
+
+function saveStats() {
+  fs.writeFileSync(statsPath, JSON.stringify(stats, null, 2));
+}
+
+function recordUser(msg) {
+  if (!msg.from || msg.from.is_bot) return;
+
+  const userId = String(msg.from.id);
+  const now = new Date().toISOString();
+
+  if (!stats.users[userId]) {
+    stats.users[userId] = {
+      firstSeen: now,
+      lastSeen: now,
+      starts: 0
+    };
+  }
+
+  stats.users[userId].lastSeen = now;
+  stats.users[userId].starts += 1;
+
+  saveStats();
+}
+
+
 const PAGE_SIZE = 4;
 const MAX_FILE_SIZE = 50 * 1024 * 1024; // حد تلغرام لرفع الملفات من البوتات
 const SEND_DELAY_MS = 500; // تأخير بين الملفات لتفادي الخطأ 429
@@ -232,7 +275,17 @@ function getAvailableFiles(level, semester, index, contentTypeId) {
       const fullPath = path.join(currentPath, entry.name);
 
       if (entry.isDirectory()) {
-        scanFolder(fullPath, basePath, forcedType);
+        let childForcedType = forcedType;
+
+        if (!childForcedType) {
+          if (entry.name === 'Examen_final') {
+            childForcedType = 'exam';
+          } else if (entry.name === 'Rattrapage') {
+            childForcedType = 'rattrapage';
+          }
+        }
+
+        scanFolder(fullPath, basePath, childForcedType);
         continue;
       }
 
@@ -258,36 +311,29 @@ function getAvailableFiles(level, semester, index, contentTypeId) {
       const yearMatch = relativePath.match(/20\d{2}(?:[-_ ]20\d{2})?/);
 
       const is2026InterroImage =
-  contentTypeId === 'interro' &&
-  (
-    entry.name === 'photo_5888542219319315287_y (1).jpg' ||
-    entry.name === 'photo_5888542219319315285_y.jpg'
-  );
+        contentTypeId === 'interro' &&
+        (
+          entry.name === 'photo_5888542219319315287_y (1).jpg' ||
+          entry.name === 'photo_5888542219319315285_y.jpg'
+        );
 
-results.push({
-  name: fileName,
-  type,
-  year: is2026InterroImage
-    ? '2026'
-    : yearMatch
-      ? yearMatch[0].replace(/_/g, '-')
-      : 'Année inconnue',
-  filePath: fullPath,
-  size: stats.size,
-  extension
-});
+      results.push({
+        name: fileName,
+        type,
+        year: is2026InterroImage
+          ? '2026'
+          : yearMatch
+            ? yearMatch[0].replace(/_/g, '-')
+            : 'Année inconnue',
+        filePath: fullPath,
+        size: stats.size,
+        extension
+      });
     }
   }
 
-  // المكتبة القديمة: pdf/<level>/<folder>/Examen_final أو Rattrapage
-  if (contentTypeId === 'exam' || contentTypeId === 'rattrapage') {
-    const oldExamFolder = path.join(
-      oldFolderPath,
-      contentTypeId === 'exam' ? 'Examen_final' : 'Rattrapage'
-    );
-
-    scanFolder(oldExamFolder, oldExamFolder, contentTypeId);
-  }
+  // المكتبة القديمة: فحص مجلد المقياس كاملًا لجميع التصنيفات
+  scanFolder(oldFolderPath, oldFolderPath, null);
 
   // المكتبة الجديدة: library/<level>/<folder>
   scanFolder(newFolderPath, newFolderPath, null);
@@ -407,7 +453,10 @@ function showSubjects(chatId, level, semester, page) {
   );
 }
 
+
 bot.onText(/\/start/, (msg) => {
+  recordUser(msg);
+
   bot.sendMessage(
     msg.chat.id,
     'مرحبًا بك في Student DZ 🎓\n\n' +
@@ -417,6 +466,46 @@ bot.onText(/\/start/, (msg) => {
     { reply_markup: { inline_keyboard: levelsKeyboard() } }
   );
 });
+
+
+bot.onText(/^\/stats(@\w+)?$/, async (msg) => {
+  console.log('stats command from:', msg.from?.id);
+
+  try {
+    const adminId = process.env.ADMIN_ID;
+
+    if (!adminId) {
+      await bot.sendMessage(
+        msg.chat.id,
+        'خطأ: ADMIN_ID غير موجود في إعدادات البيئة.'
+      );
+      return;
+    }
+
+    if (String(msg.from.id) !== String(adminId).trim()) {
+      await bot.sendMessage(msg.chat.id, 'غير مسموح لك بعرض الإحصاءات.');
+      return;
+    }
+
+    const users = Object.values(stats.users || {});
+    const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+
+    const newUsers = users.filter(
+      (user) => new Date(user.firstSeen).getTime() >= sevenDaysAgo
+    ).length;
+
+    await bot.sendMessage(
+      msg.chat.id,
+      '📊 إحصاءات Student DZ\n\n' +
+        `👥 إجمالي المستخدمين: ${users.length}\n` +
+        `🆕 المستخدمون الجدد خلال 7 أيام: ${newUsers}`
+    );
+  } catch (err) {
+    console.error('Stats error:', err);
+  }
+});
+
+
 
 bot.on('callback_query', async (query) => {
   try {
