@@ -301,10 +301,19 @@ function getAvailableFiles(level, semester, index, contentTypeId) {
     return [];
   }
 
-  const folderName = semesterData.folders[index];
+  const isPOO1 =
+  level === 'L2' &&
+  semester === 'S3' &&
+  semesterData.subjects[index] === 'Programmation orientée objet 1';
 
-  const oldFolderPath = path.join(__dirname, 'pdf', level, folderName);
-  const newFolderPath = path.join(__dirname, 'library', level, folderName);
+const folderName = isPOO1
+  ? 'Programmation_orientee_objet_2'
+  : semesterData.folders[index];
+
+const folderLevel = isPOO1 ? 'L2' : level;
+
+  const oldFolderPath = path.join(__dirname, 'pdf', folderLevel, folderName);
+const newFolderPath = path.join(__dirname, 'library', folderLevel, folderName);
 
   const results = [];
   const seen = new Set(); // لمنع تكرار نفس الملف إذا وُجد في المكتبتين
