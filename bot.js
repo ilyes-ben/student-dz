@@ -244,7 +244,7 @@ function normalizeText(text) {
 // يحدد نوع المحتوى من نص واحد (اسم ملف أو اسم مجلد)، أو null إذا لم يجد شيئًا
 function detectType(text) {
   const t = normalizeText(text);
-
+  if (/\bcode\b/.test(t)) return 'code';
   if (/solution|corrig|correction/.test(t)) return 'solution';
   if (/interro|intero|quiz/.test(t)) return 'interro';
   if (/rattrapage|rettrapage/.test(t)) return 'rattrapage';
