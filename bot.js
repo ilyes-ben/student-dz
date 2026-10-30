@@ -1,3 +1,4 @@
+
 require('dotenv').config();
 const TelegramBot = require('node-telegram-bot-api');
 const path = require('path');
@@ -13,16 +14,34 @@ const bot = new TelegramBot(token, { polling: true });
 
 const REQUIRED_CHANNEL = '@StudentDZ_Official';
 
+// تخزين المستخدمين الذين تم التحقق من اشتراكهم
+const verifiedUsers = new Set();
+
+// ==========================================
+// 1. نظام الاشتراك الإجباري
+// ==========================================
+
 async function isSubscribed(userId) {
+  // إذا سبق التحقق من المستخدم، لا نعيد الاتصال بـ Telegram
+  if (verifiedUsers.has(String(userId))) {
+    return true;
+  }
+
   try {
     const member = await bot.getChatMember(REQUIRED_CHANNEL, userId);
 
-    return (
+    const subscribed =
       member.status === 'creator' ||
       member.status === 'administrator' ||
       member.status === 'member' ||
-      (member.status === 'restricted' && member.is_member === true)
-    );
+      (member.status === 'restricted' && member.is_member === true);
+
+    // حفظ المستخدم بعد نجاح التحقق فقط
+    if (subscribed) {
+      verifiedUsers.add(String(userId));
+    }
+
+    return subscribed;
   } catch (error) {
     console.error('Subscription check error:', error.message);
     return null;
@@ -54,6 +73,9 @@ async function sendSubscriptionPrompt(chatId) {
   );
 }
 
+// ==========================================
+// 2. نظام الإحصائيات
+// ==========================================
 
 const statsPath = path.join(__dirname, 'stats.json');
 
@@ -61,26 +83,56 @@ function loadStats() {
   try {
     if (fs.existsSync(statsPath)) {
       const data = JSON.parse(fs.readFileSync(statsPath, 'utf8'));
-      if (!data.users || typeof data.users !== 'object') data.users = {};
+
+      if (!data.users || typeof data.users !== 'object') {
+        data.users = {};
+      }
+
+      if (!data.subjects || typeof data.subjects !== 'object') {
+        data.subjects = {};
+      }
+
+      if (typeof data.filesSent !== 'number') {
+        data.filesSent = 0;
+      }
+
+      for (const user of Object.values(data.users)) {
+        if (typeof user.starts !== 'number') {
+          user.starts = 0;
+        }
+
+        if (!user.firstSeen) {
+          user.firstSeen = user.lastSeen || new Date().toISOString();
+        }
+      }
+
       return data;
     }
   } catch (error) {
     console.error('Could not read stats:', error.message);
   }
 
-  return { users: {} };
+  return {
+    users: {},
+    subjects: {},
+    filesSent: 0
+  };
 }
 
 let stats = loadStats();
 
 function saveStats() {
-  fs.writeFileSync(statsPath, JSON.stringify(stats, null, 2));
+  try {
+    fs.writeFileSync(statsPath, JSON.stringify(stats, null, 2));
+  } catch (error) {
+    console.error('Could not save stats:', error.message);
+  }
 }
 
-function recordUser(msg) {
-  if (!msg.from || msg.from.is_bot) return;
+function recordActivity(from) {
+  if (!from || from.is_bot) return;
 
-  const userId = String(msg.from.id);
+  const userId = String(from.id);
   const now = new Date().toISOString();
 
   if (!stats.users[userId]) {
@@ -91,16 +143,56 @@ function recordUser(msg) {
     };
   }
 
-  stats.users[userId].lastSeen = now;
-  stats.users[userId].starts += 1;
+  const user = stats.users[userId];
+
+  user.lastSeen = now;
+  user.first_name = from.first_name || user.first_name || '';
+  user.last_name = from.last_name || user.last_name || '';
+  user.username = from.username || user.username || '';
 
   saveStats();
 }
 
+function recordUser(msg) {
+  if (!msg.from || msg.from.is_bot) return;
+
+  const userId = String(msg.from.id);
+
+  if (!stats.users[userId]) {
+    const now = new Date().toISOString();
+
+    stats.users[userId] = {
+      firstSeen: now,
+      lastSeen: now,
+      starts: 0
+    };
+  }
+
+  stats.users[userId].starts += 1;
+
+  recordActivity(msg.from);
+}
+
+function formatDate(date) {
+  if (!date) return 'غير معروف';
+
+  const timestamp = new Date(date).getTime();
+
+  if (Number.isNaN(timestamp)) return 'غير معروف';
+
+  return new Date(timestamp).toLocaleString('ar-DZ', {
+    dateStyle: 'short',
+    timeStyle: 'short'
+  });
+}
+
+// ==========================================
+// 3. إعدادات المكتبة
+// ==========================================
 
 const PAGE_SIZE = 4;
-const MAX_FILE_SIZE = 50 * 1024 * 1024; // حد تلغرام لرفع الملفات من البوتات
-const SEND_DELAY_MS = 500; // تأخير بين الملفات لتفادي الخطأ 429
+const MAX_FILE_SIZE = 50 * 1024 * 1024;
+const SEND_DELAY_MS = 500;
 
 const semesters = {
   L1: {
@@ -152,7 +244,7 @@ const semesters = {
       subjects: [
         'Architecture des ordinateurs',
         'Algorithmique et structure de données 3',
-        "Systèmes d'information",
+        'Systèmes d information',
         'Programmation orientée objet 1',
         'Méthodes numériques',
         'Probabilités et statistique 1',
@@ -232,7 +324,10 @@ function levelsKeyboard() {
   ];
 }
 
-// تنظيف النص: إزالة الحركات والتشكيل واستبدال الرموز بمسافات
+// ==========================================
+// 4. تصنيف الملفات
+// ==========================================
+
 function normalizeText(text) {
   return text
     .normalize('NFD')
@@ -241,9 +336,9 @@ function normalizeText(text) {
     .toLowerCase();
 }
 
-// يحدد نوع المحتوى من نص واحد (اسم ملف أو اسم مجلد)، أو null إذا لم يجد شيئًا
 function detectType(text) {
   const t = normalizeText(text);
+
   if (/\bcode\b/.test(t)) return 'code';
   if (/solution|corrig|correction/.test(t)) return 'solution';
   if (/interro|intero|quiz/.test(t)) return 'interro';
@@ -256,21 +351,19 @@ function detectType(text) {
   return null;
 }
 
-// اسم المجلد: إذا جمع بين كلمات التصحيح وكلمات الامتحان معًا (مثل Exam_et_Solutions)
-// فهو غامض، فنتركه ونعتمد على اسم الملف
 function detectFolderType(folderName) {
   const t = normalizeText(folderName);
 
   const hasSolution = /solution|corrig|correction/.test(t);
-  const hasExam = /\b(exam|examen|examens|sujet|sujets)\b|rattrapage|rettrapage|interro|intero|quiz/.test(t);
+
+  const hasExam =
+    /\b(exam|examen|examens|sujet|sujets)\b|rattrapage|rettrapage|interro|intero|quiz/.test(t);
 
   if (hasSolution && hasExam) return null;
 
   return detectType(folderName);
 }
 
-// تصنيف ملفات مجلد library: تنظيم Drive هو المرجع، أي المجلدات من الأعمق إلى الأعم
-// ثم اسم الملف إذا لم يدل أي مجلد على النوع
 function classifyFile(fullPath, basePath) {
   const extension = path.extname(fullPath).toLowerCase();
   const fileName = path.basename(fullPath, extension);
@@ -302,27 +395,26 @@ function getAvailableFiles(level, semester, index, contentTypeId) {
   }
 
   const isPOO1 =
-  level === 'L2' &&
-  semester === 'S3' &&
-  semesterData.subjects[index] === 'Programmation orientée objet 1';
+    level === 'L2' &&
+    semester === 'S3' &&
+    semesterData.subjects[index] === 'Programmation orientée objet 1';
 
-const folderName = isPOO1
-  ? 'Programmation_orientee_objet_2'
-  : semesterData.folders[index];
+  const folderName = isPOO1
+    ? 'Programmation_orientee_objet_2'
+    : semesterData.folders[index];
 
-const folderLevel = isPOO1 ? 'L2' : level;
+  const folderLevel = isPOO1 ? 'L2' : level;
 
   const oldFolderPath = path.join(__dirname, 'pdf', folderLevel, folderName);
-const newFolderPath = path.join(__dirname, 'library', folderLevel, folderName);
+  const newFolderPath = path.join(__dirname, 'library', folderLevel, folderName);
 
   const results = [];
-  const seen = new Set(); // لمنع تكرار نفس الملف إذا وُجد في المكتبتين
+  const seen = new Set();
 
   function scanFolder(currentPath, basePath, forcedType) {
     if (!fs.existsSync(currentPath)) return;
 
     for (const entry of fs.readdirSync(currentPath, { withFileTypes: true })) {
-      // تجاهل الملفات المخفية وملفات Office المؤقتة
       if (entry.name.startsWith('.') || entry.name.startsWith('~$')) continue;
 
       const fullPath = path.join(currentPath, entry.name);
@@ -352,14 +444,14 @@ const newFolderPath = path.join(__dirname, 'library', folderLevel, folderName);
 
       if (type !== contentTypeId) continue;
 
-      const stats = fs.statSync(fullPath);
+      const fileStats = fs.statSync(fullPath);
       const fileName = path.basename(entry.name, extension);
-      const dedupeKey = `${fileName.toLowerCase()}|${stats.size}`;
+      const dedupeKey = `${fileName.toLowerCase()}|${fileStats.size}`;
 
       if (seen.has(dedupeKey)) continue;
+
       seen.add(dedupeKey);
 
-      // البحث عن السنة في المسار النسبي فقط حتى لا يتأثر بمسار جهازك
       const relativePath = path.relative(basePath, fullPath);
       const yearMatch = relativePath.match(/20\d{2}(?:[-_ ]20\d{2})?/);
 
@@ -379,16 +471,13 @@ const newFolderPath = path.join(__dirname, 'library', folderLevel, folderName);
             ? yearMatch[0].replace(/_/g, '-')
             : 'Année inconnue',
         filePath: fullPath,
-        size: stats.size,
+        size: fileStats.size,
         extension
       });
     }
   }
 
-  // المكتبة القديمة: فحص مجلد المقياس كاملًا لجميع التصنيفات
   scanFolder(oldFolderPath, oldFolderPath, null);
-
-  // المكتبة الجديدة: library/<level>/<folder>
   scanFolder(newFolderPath, newFolderPath, null);
 
   results.sort((a, b) =>
@@ -398,7 +487,10 @@ const newFolderPath = path.join(__dirname, 'library', folderLevel, folderName);
   return results;
 }
 
-// إرسال ملف واحد مع إعادة المحاولة عند الخطأ 429
+// ==========================================
+// 5. إرسال الملفات
+// ==========================================
+
 async function sendFileSafely(chatId, file, caption) {
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
@@ -419,6 +511,10 @@ async function sendFileSafely(chatId, file, caption) {
 
   return false;
 }
+
+// ==========================================
+// 6. القوائم
+// ==========================================
 
 function showSemesters(chatId, level) {
   const levelSemesters = semesters[level];
@@ -506,45 +602,51 @@ function showSubjects(chatId, level, semester, page) {
   );
 }
 
-
+// ==========================================
+// 7. أمر البداية
+// ==========================================
 
 bot.onText(/^\/start/, async (msg) => {
-  recordUser(msg);
+  try {
+    const subscription = await isSubscribed(msg.from.id);
 
-  const subscription = await isSubscribed(msg.from.id);
+    if (subscription === null) {
+      await bot.sendMessage(
+        msg.chat.id,
+        'تعذّر التحقق من الاشتراك حاليًا. حاول مجددًا بعد قليل.'
+      );
+      return;
+    }
 
-  if (subscription === null) {
+    if (!subscription) {
+      await sendSubscriptionPrompt(msg.chat.id);
+      return;
+    }
+
+    recordUser(msg);
+
     await bot.sendMessage(
       msg.chat.id,
-      'تعذّر التحقق من الاشتراك حاليًا. حاول مجددًا بعد قليل.'
-    );
-    return;
-  }
-
-  if (!subscription) {
-    await sendSubscriptionPrompt(msg.chat.id);
-    return;
-  }
-
-  await bot.sendMessage(
-    msg.chat.id,
-    'مرحبًا بك في Student DZ 🎓\n\n' +
-      'مكتبة الامتحانات والفروض الجامعية\n' +
-      'جامعة برج بوعريريج\n\n' +
-      'اختر مستواك:',
-    {
-      reply_markup: {
-        inline_keyboard: levelsKeyboard()
+      'مرحبًا بك في Student DZ 🎓\n\n' +
+        'مكتبة الامتحانات والفروض الجامعية\n' +
+        'جامعة برج بوعريريج\n\n' +
+        'اختر مستواك:',
+      {
+        reply_markup: {
+          inline_keyboard: levelsKeyboard()
+        }
       }
-    }
-  );
+    );
+  } catch (error) {
+    console.error('Start error:', error.message);
+  }
 });
 
-
+// ==========================================
+// 8. لوحة الإحصائيات للمشرف
+// ==========================================
 
 bot.onText(/^\/stats(@\w+)?$/, async (msg) => {
-  console.log('stats command from:', msg.from?.id);
-
   try {
     const adminId = process.env.ADMIN_ID;
 
@@ -561,34 +663,91 @@ bot.onText(/^\/stats(@\w+)?$/, async (msg) => {
       return;
     }
 
-    const users = Object.values(stats.users || {});
-    const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+    const users = Object.entries(stats.users || {});
+    const now = Date.now();
 
-    const newUsers = users.filter(
-      (user) => new Date(user.firstSeen).getTime() >= sevenDaysAgo
-    ).length;
+    const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
+    const twentyFourHoursAgo = now - 24 * 60 * 60 * 1000;
 
-    await bot.sendMessage(
-      msg.chat.id,
+    const newUsers = users.filter(([id, user]) => {
+      return new Date(user.firstSeen).getTime() >= sevenDaysAgo;
+    }).length;
+
+    const activeUsers = users
+      .filter(([id, user]) => {
+        return new Date(user.lastSeen).getTime() >= twentyFourHoursAgo;
+      })
+      .sort((a, b) => {
+        return new Date(b[1].lastSeen) - new Date(a[1].lastSeen);
+      });
+
+    const topSubjects = Object.entries(stats.subjects || {})
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10);
+
+    let message =
       '📊 إحصاءات Student DZ\n\n' +
-        `👥 إجمالي المستخدمين: ${users.length}\n` +
-        `🆕 المستخدمون الجدد خلال 7 أيام: ${newUsers}`
-    );
+      `👥 إجمالي المستخدمين: ${users.length}\n` +
+      `🆕 المستخدمون الجدد خلال 7 أيام: ${newUsers}\n` +
+      `🟢 النشطون خلال 24 ساعة: ${activeUsers.length}\n` +
+      `📤 الملفات المرسلة بنجاح: ${stats.filesSent}\n\n`;
+
+    message += '🏆 أكثر 10 مقاييس طلبًا:\n\n';
+
+    if (topSubjects.length === 0) {
+      message += 'لا توجد طلبات مسجلة بعد.\n';
+    } else {
+      topSubjects.forEach(([subject, count], index) => {
+        message += `${index + 1}. ${subject}: ${count} طلب\n`;
+      });
+    }
+
+    message += '\n━━━━━━━━━━━━━━━━━━\n';
+    message += `👤 المستخدمون النشطون (آخر 20):\n\n`;
+
+    if (activeUsers.length === 0) {
+      message += 'لا يوجد مستخدمون نشطون خلال آخر 24 ساعة.';
+    } else {
+      activeUsers.slice(0, 20).forEach(([id, user], index) => {
+        const fullName =
+          [user.first_name, user.last_name]
+            .filter(Boolean)
+            .join(' ') || 'اسم غير متوفر';
+
+        const username = user.username
+          ? `@${user.username}`
+          : 'لا يوجد username';
+
+        message +=
+          `${index + 1}. ${fullName}\n` +
+          `   ${username}\n` +
+          `   ID: ${id}\n` +
+          `   آخر نشاط: ${formatDate(user.lastSeen)}\n\n`;
+      });
+    }
+
+    await bot.sendMessage(msg.chat.id, message);
   } catch (err) {
     console.error('Stats error:', err);
+    await bot.sendMessage(msg.chat.id, 'حدث خطأ أثناء عرض الإحصائيات.');
   }
 });
 
-
+// ==========================================
+// 9. التعامل مع الأزرار
+// ==========================================
 
 bot.on('callback_query', async (query) => {
   try {
+    // الإجابة عن ضغط الزر فورًا
     await bot.answerCallbackQuery(query.id);
+
+    if (!query.message) return;
 
     const chatId = query.message.chat.id;
     const choice = query.data;
-    
-    // زر إعادة التحقق من الاشتراك
+
+    // إعادة التحقق من الاشتراك
     if (choice === 'check_subscription') {
       const subscription = await isSubscribed(query.from.id);
 
@@ -605,6 +764,8 @@ bot.on('callback_query', async (query) => {
         return;
       }
 
+      recordActivity(query.from);
+
       await bot.sendMessage(
         chatId,
         '✅ تم التحقق من اشتراكك بنجاح!\n\nاختر مستواك:',
@@ -614,10 +775,12 @@ bot.on('callback_query', async (query) => {
           }
         }
       );
+
       return;
     }
 
-    // منع استخدام أزرار القوائم دون اشتراك
+    // التحقق من الاشتراك في بقية الأزرار
+    // لن يتصل بـ Telegram مجددًا إذا كان المستخدم قد تحقق سابقًا
     const subscription = await isSubscribed(query.from.id);
 
     if (subscription === null) {
@@ -633,6 +796,7 @@ bot.on('callback_query', async (query) => {
       return;
     }
 
+    recordActivity(query.from);
 
     // العودة إلى قائمة المستويات
     if (choice === 'back_levels') {
@@ -669,6 +833,7 @@ bot.on('callback_query', async (query) => {
     // التنقل بين صفحات المقاييس
     if (choice.startsWith('page_')) {
       const [, level, semester, pageText] = choice.split('_');
+
       await showSubjects(chatId, level, semester, Number(pageText));
       return;
     }
@@ -715,12 +880,18 @@ bot.on('callback_query', async (query) => {
       const index = Number(indexText);
 
       const subject = semesters[level]?.[semester]?.subjects[index];
-      const selectedType = contentTypes.find((item) => item.id === contentTypeId);
+
+      const selectedType = contentTypes.find(
+        (item) => item.id === contentTypeId
+      );
 
       if (!subject || !selectedType) {
         await bot.sendMessage(chatId, 'حدث خطأ في اختيار التصنيف.');
         return;
       }
+
+      stats.subjects[subject] = (stats.subjects[subject] || 0) + 1;
+      saveStats();
 
       const backButton = {
         reply_markup: {
@@ -768,8 +939,14 @@ bot.on('callback_query', async (query) => {
 
         const sent = await sendFileSafely(chatId, file, caption);
 
-        if (!sent) {
-          await bot.sendMessage(chatId, `⚠️ تعذر إرسال الملف: ${file.name}`);
+        if (sent) {
+          stats.filesSent += 1;
+          saveStats();
+        } else {
+          await bot.sendMessage(
+            chatId,
+            `⚠️ تعذر إرسال الملف: ${file.name}`
+          );
         }
 
         await sleep(SEND_DELAY_MS);
@@ -783,6 +960,10 @@ bot.on('callback_query', async (query) => {
   }
 });
 
+// ==========================================
+// 10. معالجة الأخطاء
+// ==========================================
+
 process.on('unhandledRejection', (err) => {
   console.error('Unhandled rejection:', err);
 });
@@ -792,3 +973,4 @@ bot.on('polling_error', (err) => {
 });
 
 console.log('Student DZ is running!');
+
